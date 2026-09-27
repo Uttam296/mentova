@@ -5,7 +5,7 @@ import { useAuth } from '../context/AuthContext';
 import './Chat.css';
 
 const Chat = () => {
-  const { user, API } = useAuth();
+  const { user, API, socket } = useAuth();
   const { userId } = useParams();
   const navigate = useNavigate();
   const [conversations, setConversations] = useState([]);
@@ -58,12 +58,55 @@ const Chat = () => {
     if (!input.trim() || !activeUser) return;
     const content = input.trim();
     setInput('');
-    try {
-      const res = await axios.post(`${API}/messages`, { receiverId: activeUser._id, content });
-      setMessages(prev => [...prev, res.data]);
-      fetchConversations();
-    } catch {}
+
+    if (socket && socket.connected) {
+      // Real-time path: server persists the message AND pushes it live
+      // to the receiver's browser via the 'receiveMessage' event.
+      socket.emit('sendMessage', {
+        senderId: user._id,
+        receiverId: activeUser._id,
+        message: content
+      });
+    } else {
+      // Fallback if the socket connection drops: still saves via REST
+      // so the message is never lost, just without the instant push.
+      try {
+        const res = await axios.post(`${API}/messages`, { receiverId: activeUser._id, content });
+        setMessages(prev => [...prev, res.data]);
+        fetchConversations();
+      } catch {}
+    }
   };
+
+  // Live updates: confirmation of my own sent message, and incoming
+  // messages pushed from the other person in real time.
+  useEffect(() => {
+    if (!socket) return;
+
+    const handleMessageSent = (msg) => {
+      const otherId = msg.receiver?._id || msg.receiver;
+      if (activeUser && otherId === activeUser._id) {
+        setMessages(prev => [...prev, msg]);
+      }
+      fetchConversations();
+    };
+
+    const handleReceiveMessage = (msg) => {
+      const otherId = msg.sender?._id || msg.sender;
+      if (activeUser && otherId === activeUser._id) {
+        setMessages(prev => [...prev, msg]);
+      }
+      fetchConversations();
+    };
+
+    socket.on('messageSent', handleMessageSent);
+    socket.on('receiveMessage', handleReceiveMessage);
+
+    return () => {
+      socket.off('messageSent', handleMessageSent);
+      socket.off('receiveMessage', handleReceiveMessage);
+    };
+  }, [socket, activeUser]);
 
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
